@@ -17,6 +17,13 @@ class Server {
     return this.signer.address;
   }
 
+  addPost(certificate: string, posterSignature: string) {
+    // decode the certificate (first 32 bytes is the poster address)
+
+
+
+  }
+
 
 }
 
@@ -123,6 +130,31 @@ describe("StakedModeration", function () {
 
   it("Create and contest a post", async function () {
 
+    const smModerator = sm.connect(moderators[0]);
+
+    const contestationFee = (await sm.settings())[2];
+    console.log(`Contestation fee: ${contestationFee} or (${ethers.formatEther(contestationFee)} ETH)`)
+
+    const postCertificate = `${posters[0].address}`
+
+    const serverSignature = await server.signer.signMessage(postCertificate);
+    console.log(`Server signature: ${serverSignature}`)
+
+    const posterSignature = await posters[0].signMessage(postCertificate);
+    console.log(`Poster signature: ${posterSignature}`)
+
+    console.log(`Posters Address ${posters[0].address}`)
+
+    // contest the post
+    await smModerator.contestPost(
+      posters[0].address,
+      postCertificate,
+      serverSignature,
+      posterSignature,
+      {
+        value: contestationFee,
+      }
+    )
 
   });
 
