@@ -129,26 +129,19 @@ describe("StakedModeration", function () {
   });
 
   it("Create and contest a post", async function () {
-
     const smModerator = sm.connect(moderators[0]);
 
     const contestationFee = (await sm.settings())[2];
     console.log(`Contestation fee: ${contestationFee} or (${ethers.formatEther(contestationFee)} ETH)`)
 
-    const postCertificate = `${posters[0].address}`
-
+    const postCertificate = ethers.AbiCoder.defaultAbiCoder().encode(['address'], [posters[0].address]);
     console.log(`Post certificate: ${postCertificate}`)
-    console.log(`Hashed once ${ethers.keccak256(postCertificate)}`)
+
     const serverSignature = await server.signer.signMessage(ethers.getBytes(ethers.keccak256(postCertificate)));
-    console.log(`Server signature: ${serverSignature}`)
-
     const posterSignature = await posters[0].signMessage(ethers.getBytes(ethers.keccak256(postCertificate)));
-    console.log(`Poster signature: ${posterSignature}`)
-
-    console.log(`Posters Address ${posters[0].address}`)
 
     // contest the post
-    await smModerator.contestPost(
+    const tx = await smModerator.contestPost(
       posters[0].address,
       postCertificate,
       serverSignature,
@@ -157,6 +150,38 @@ describe("StakedModeration", function () {
         value: contestationFee,
       }
     )
+
+    await tx.wait();
+
+    // find contestation
+    const contestation = await sm.contestations(0);
+    console.log(contestation)
+
+    expect(contestation[0]).to.equal(postCertificate);
+    expect(contestation[1]).to.equal(posters[0].address);
+    expect(contestation[2]).to.equal(moderators[0].address);
+  });
+
+  it("The poster and the moderator may not participate in this vote", async function () {
+    const smModerator = sm.connect(moderators[0]);
+    const smPoster = sm.connect(posters[0]);
+
+    const expectFailure = async (sm: any) => {
+      let failed = false;
+      try {
+        await sm.voteOnContestation(0, true)
+      }
+      catch (e) {
+        failed = true;
+      }
+      expect(failed).to.equal(true);
+    }
+
+    await expectFailure(smModerator);
+    await expectFailure(smPoster);
+  })
+
+  it("People can vote on a contestation", async function () {
 
   });
 
