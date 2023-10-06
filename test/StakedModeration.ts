@@ -137,10 +137,12 @@ describe("StakedModeration", function () {
 
     const postCertificate = `${posters[0].address}`
 
-    const serverSignature = await server.signer.signMessage(postCertificate);
+    console.log(`Post certificate: ${postCertificate}`)
+    console.log(`Hashed once ${ethers.keccak256(postCertificate)}`)
+    const serverSignature = await server.signer.signMessage(ethers.getBytes(ethers.keccak256(postCertificate)));
     console.log(`Server signature: ${serverSignature}`)
 
-    const posterSignature = await posters[0].signMessage(postCertificate);
+    const posterSignature = await posters[0].signMessage(ethers.getBytes(ethers.keccak256(postCertificate)));
     console.log(`Poster signature: ${posterSignature}`)
 
     console.log(`Posters Address ${posters[0].address}`)
