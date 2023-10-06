@@ -27,18 +27,15 @@ contract StakedModeration is PullPayment, AccessControl {
         uint256 moderatorLock;
         uint256 contestationFee;
         bool sucessful;
-        bool complete;
+        uint256 closureBlock;
     }
 
-    // struct Vote {
-    //     address voter;
-    //     uint256 weight; // the balance of the account when the contestation is closed ... (not when the vote is cast because that would allow people to vote on the same issue with the same coins)
-    //     bool vote;
-    // }
     struct Vote {
         bool didVote;
         bool vote;
     }
+
+    uint256 constant BLOCKTIME = 2 seconds;
 
     mapping(address => uint256) public contentCreatorDeposits;
     mapping(address => uint256) public moderatorDeposits;
@@ -52,6 +49,8 @@ contract StakedModeration is PullPayment, AccessControl {
 
     mapping(uint256 => uint256) contestationIdToVoteCount;
     mapping(uint256 => mapping(uint256 => address)) contestationIdToVoteIndexToAddress;
+
+    mapping(uint256 => bool) rewardsHaveBeenDistributed;
 
     Settings public settings;
 
@@ -125,6 +124,18 @@ contract StakedModeration is PullPayment, AccessControl {
         _revokeRole(MODERATOR_ROLE, msg.sender);
     }
 
+    function _isContestationOpen (uint256 _contestationID) internal view returns (bool) {
+        if (_contestationIdCounter.current() <= _contestationID) {
+            return false;
+        }
+
+        if (contestations[_contestationID].closureBlock < block.number) {
+            return false;
+        }
+
+        return true;
+    }
+
     function contestPost(
         address poster,
         bytes calldata certificate,
@@ -183,7 +194,7 @@ contract StakedModeration is PullPayment, AccessControl {
             moderatorLock: moderatorDeposits[msg.sender],
             contestationFee: settings.contestationFee,
             sucessful: false,
-            complete: false
+            closureBlock: block.number + ( 86400 seconds / BLOCKTIME)
         });
 
         console.log("---Contestation Created------");
@@ -199,11 +210,7 @@ contract StakedModeration is PullPayment, AccessControl {
 
     function voteOnContestation(uint256 _contestationID, bool yayRemovePost) public {
         require(
-            _contestationID < _contestationIdCounter.current(),
-            "Contestation does not exist"
-        );
-          require(
-            contestations[_contestationID].complete == false,
+            _isContestationOpen(_contestationID),
             "Contestation is over"
         );
         require(
@@ -229,10 +236,98 @@ contract StakedModeration is PullPayment, AccessControl {
         contestationIdToVoteCount[_contestationID] = voteCount + 1;
     }
 
-    function distributeContestation() public {
+    function distributeContestation(uint256 contestationId) public {
+        // disable for testing
+        // require(
+        //     _isContestationOpen(contestationId) == false,
+        //     "Contestation is still open"
+        // );
+
+        require(
+            rewardsHaveBeenDistributed[contestationId] == false,
+            "Rewards have already been distributed"
+        );
+
+        uint256 numberOfVotes = contestationIdToVoteCount[contestationId];
+        uint256 yayVotes = 0; // count of votes confirming that the post should be removed
+        uint256 nayVotes = 0; // count of votes confirming that the post should not be removed
+        uint256[] memory voteShare = new uint256[](numberOfVotes);
+        uint256 totalAdaParticipation = 0;
+
+        // TODO: account for the users staked Ada (which on milkomeda is an ERC20 token)
+
+        for (uint256 i = 0; i < numberOfVotes; i++) {
+            address voter = contestationIdToVoteIndexToAddress[contestationId][i];
+            voteShare[i] = voter.balance;
+            totalAdaParticipation += voter.balance;
+            if (contestationToVote[contestationId][voter].vote == true) {
+                yayVotes += voter.balance;
+                continue;
+            }
+            nayVotes += voter.balance;
+        }
+
+        if (yayVotes > nayVotes) {
+            _posterWins(contestationId);
+        } else {
+            _moderatorWins(contestationId);
+        }
+
+        _distributeVoterRewards(contestationId, voteShare, totalAdaParticipation);
+
         // TODO
         // contestation fee (paid by moderation when contestation is created) is paid to everyone who voted based on their vote weight
         // if contestation was successful pay the payout to the moderator
         // if contestation was unsuccessful pay the payout to the poster
+
+        rewardsHaveBeenDistributed[contestationId] = true;
+    }
+
+    function _distributeVoterRewards(uint256 contestationId, uint256[] memory voteShare, uint256 totalAdaParticipation) internal {
+        uint256 contestationFee = contestations[contestationId].contestationFee;
+        uint256 numberOfVotes = contestationIdToVoteCount[contestationId];
+        console.log("---Contestation Fee: %s", contestationFee);
+        console.log("---Number of Votes: %s", numberOfVotes);
+        console.log("---Total Ada Participation: %s", totalAdaParticipation);
+
+        for (uint256 i = 0; i < numberOfVotes; i++) {
+            address voter = contestationIdToVoteIndexToAddress[contestationId][i];
+            uint256 voterReward = ( ((voteShare[i] * 1 gwei) / totalAdaParticipation) * contestationFee) / 1 gwei;
+
+            console.log("---Async Transfer of %s to %s (contract balance: %s)", voterReward, voter, address(this).balance);
+            _asyncTransfer(voter, voterReward);
+        }
+    }
+
+    function _posterWins(uint256 contestationId) internal {
+        uint256 moderatorDeposit = contestations[contestationId].moderatorLock;
+        address poster = contestations[contestationId].poster;
+        address moderator = contestations[contestationId].moderator;
+
+        moderatorDeposits[contestations[contestationId].moderator] -= moderatorDeposit;
+        _asyncTransfer(poster, moderatorDeposit);
+
+        if(  moderatorDeposits[contestations[contestationId].moderator] < settings.moderationDeposit) {
+            _revokeRole(MODERATOR_ROLE, contestations[contestationId].moderator);
+        }
+
+        contentCreatorDepositLocked[poster] = false;
+        moderatorDepositLocked[moderator] = false;
+    }
+
+    function _moderatorWins(uint256 contestationId) internal {
+        uint256 posterDeposit = contestations[contestationId].posterLock;
+        address poster = contestations[contestationId].poster;
+        address moderator = contestations[contestationId].moderator;
+
+        contentCreatorDeposits[contestations[contestationId].poster] -= posterDeposit;
+        _asyncTransfer(moderator, posterDeposit);
+
+        if(  contentCreatorDeposits[contestations[contestationId].poster] < settings.contentCreationDeposit) {
+            _revokeRole(POSTER_ROLE, contestations[contestationId].poster);
+        }
+
+        contentCreatorDepositLocked[poster] = false;
+        moderatorDepositLocked[msg.sender] = false;
     }
 }

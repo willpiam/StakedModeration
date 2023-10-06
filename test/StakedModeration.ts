@@ -182,9 +182,42 @@ describe("StakedModeration", function () {
   })
 
   it("People can vote on a contestation", async function () {
+    const wallets: any[] = await ethers.getSigners();
 
+    // wallet 4 sends half its balance to wallet 3
+    const wallet4 = wallets[4];
+    const wallet3 = wallets[3];
+
+    const wallet4Balance = await ethers.provider.getBalance(wallet4.address);
+    console.log(`Wallet 4 balance: ${wallet4Balance} or (${ethers.formatEther(wallet4Balance)} ETH)`)
+
+    const amountToSend = wallet4Balance / 2n;
+    console.log(`Sending ${amountToSend} from ${wallet4.address} to ${wallet3.address}`)
+    await wallet4.sendTransaction({
+      to: wallet3.address,
+      value: amountToSend,
+    });
+  
+    const wallet4BalanceAfter = await ethers.provider.getBalance(wallet4.address);
+    console.log(`Wallet 4 balance: ${wallet4BalanceAfter} or (${ethers.formatEther(wallet4BalanceAfter)} ETH)`)
+
+    for (let i = 3; i < wallets.length; i++) {
+    // for (let i = 3; i < 6; i++) {
+      const vote : boolean = Math.random() * 1000 % 2 == 0;
+      console.log(`Voting ${vote ? 'yes': 'no'} from ${wallets[i].address}`)
+
+      const smConnected = await sm.connect(wallets[i])
+      const tx = await smConnected.voteOnContestation(0, vote);
+      await tx.wait()
+    }
   });
 
+  it("Once the contestation is over, the funds can be distributed", async function () {
+    const smModerator = await sm.connect(moderators[0]);
+
+    await smModerator.distributeContestation(0);
+    
+  })
 
 
 });
