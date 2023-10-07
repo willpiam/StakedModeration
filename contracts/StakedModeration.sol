@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/utils/Counters.sol";
 import "@openzeppelin/contracts/security/PullPayment.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 // Uncomment this line to use console.log
 import "hardhat/console.sol";
@@ -13,10 +14,14 @@ contract StakedModeration is PullPayment, AccessControl {
     using Counters for Counters.Counter;
     using ECDSA for bytes32;
 
+    event ContestationCreated(uint256 indexed contestationId);
+    event ContestationClosed(uint256 indexed contestationId, uint256 indexed yayVotes, uint256 indexed nayVotes);
+
     struct Settings {
-        uint256 contentCreationDeposit;
+        uint256 posterDeposit;
         uint256 moderationDeposit;
         uint256 contestationFee;
+        address stakedAdaAddress;
     }
 
     struct Contestation {
@@ -26,7 +31,6 @@ contract StakedModeration is PullPayment, AccessControl {
         uint256 posterLock;
         uint256 moderatorLock;
         uint256 contestationFee;
-        bool sucessful;
         uint256 closureBlock;
     }
 
@@ -57,25 +61,30 @@ contract StakedModeration is PullPayment, AccessControl {
     bytes32 private constant MODERATOR_ROLE = keccak256("MODERATOR_ROLE");
     bytes32 private constant POSTER_ROLE = keccak256("POSTER_ROLE");
 
-    event ContestationCreated(uint256 indexed contestationId);
     Counters.Counter private _contestationIdCounter;
 
     address serverAddress; // address of keys used by server to sign post creation certificates
 
-    constructor(address _serverAddress) {
+    constructor(address _serverAddress, address _stakedAdaAddress) {
         _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _setupRole(POSTER_ROLE, msg.sender);
         settings = Settings({
-            contentCreationDeposit: 1 ether,
+            posterDeposit: 1 ether,
             moderationDeposit: 1 ether,
-            contestationFee: 0.1 ether
+            contestationFee: 0.1 ether,
+            stakedAdaAddress: _stakedAdaAddress
         });
         serverAddress = _serverAddress;
     }
 
+    function _adaBalance(address account) internal view returns (uint256) {
+        IERC20 stmADA = IERC20(settings.stakedAdaAddress);
+        return account.balance + stmADA.balanceOf(account);
+    }
+
     function depositPosterStake(address poster) public payable {
         require(
-            msg.value == settings.contentCreationDeposit,
+            msg.value == settings.posterDeposit,
             "Incorrect deposit amount"
         );
         require(
@@ -108,7 +117,7 @@ contract StakedModeration is PullPayment, AccessControl {
             contentCreatorDepositLocked[msg.sender] == false,
             "May not withdraw during a contestation"
         );
-        payable(msg.sender).transfer(contentCreatorDeposits[msg.sender]);
+        _asyncTransfer(msg.sender, contentCreatorDeposits[msg.sender]);
         contentCreatorDeposits[msg.sender] = 0;
         _revokeRole(POSTER_ROLE, msg.sender);
     }
@@ -119,7 +128,7 @@ contract StakedModeration is PullPayment, AccessControl {
             moderatorDepositLocked[msg.sender] == false,
             "May not withdraw during a contestation"
         );
-        payable(msg.sender).transfer(moderatorDeposits[msg.sender]);
+        _asyncTransfer(msg.sender, moderatorDeposits[msg.sender]);
         moderatorDeposits[msg.sender] = 0;
         _revokeRole(MODERATOR_ROLE, msg.sender);
     }
@@ -193,7 +202,6 @@ contract StakedModeration is PullPayment, AccessControl {
             posterLock: contentCreatorDeposits[poster],
             moderatorLock: moderatorDeposits[msg.sender],
             contestationFee: settings.contestationFee,
-            sucessful: false,
             closureBlock: block.number + ( 86400 seconds / BLOCKTIME)
         });
 
@@ -236,7 +244,7 @@ contract StakedModeration is PullPayment, AccessControl {
         contestationIdToVoteCount[_contestationID] = voteCount + 1;
     }
 
-    function distributeContestation(uint256 contestationId) public {
+    function closeContestation(uint256 contestationId) public {
         // disable for testing
         // require(
         //     _isContestationOpen(contestationId) == false,
@@ -254,33 +262,31 @@ contract StakedModeration is PullPayment, AccessControl {
         uint256[] memory voteShare = new uint256[](numberOfVotes);
         uint256 totalAdaParticipation = 0;
 
-        // TODO: account for the users staked Ada (which on milkomeda is an ERC20 token)
-
         for (uint256 i = 0; i < numberOfVotes; i++) {
             address voter = contestationIdToVoteIndexToAddress[contestationId][i];
-            voteShare[i] = voter.balance;
-            totalAdaParticipation += voter.balance;
+            uint256 voterBalance = _adaBalance(voter);
+            voteShare[i] = voterBalance;
+            totalAdaParticipation += voterBalance;
             if (contestationToVote[contestationId][voter].vote == true) {
-                yayVotes += voter.balance;
+                yayVotes += voterBalance;
                 continue;
             }
-            nayVotes += voter.balance;
+            nayVotes += voterBalance;
         }
 
+        console.log("---Yay Votes: %s", yayVotes);
+        console.log("---Nay Votes: %s", nayVotes);
+
         if (yayVotes > nayVotes) {
-            _posterWins(contestationId);
-        } else {
             _moderatorWins(contestationId);
+        } else {
+            _posterWins(contestationId);
         }
 
         _distributeVoterRewards(contestationId, voteShare, totalAdaParticipation);
 
-        // TODO
-        // contestation fee (paid by moderation when contestation is created) is paid to everyone who voted based on their vote weight
-        // if contestation was successful pay the payout to the moderator
-        // if contestation was unsuccessful pay the payout to the poster
-
         rewardsHaveBeenDistributed[contestationId] = true;
+        emit ContestationClosed(contestationId, yayVotes, nayVotes);
     }
 
     function _distributeVoterRewards(uint256 contestationId, uint256[] memory voteShare, uint256 totalAdaParticipation) internal {
@@ -300,6 +306,7 @@ contract StakedModeration is PullPayment, AccessControl {
     }
 
     function _posterWins(uint256 contestationId) internal {
+        console.log("---Poster Wins");
         uint256 moderatorDeposit = contestations[contestationId].moderatorLock;
         address poster = contestations[contestationId].poster;
         address moderator = contestations[contestationId].moderator;
@@ -316,6 +323,7 @@ contract StakedModeration is PullPayment, AccessControl {
     }
 
     function _moderatorWins(uint256 contestationId) internal {
+        console.log("---Moderator Wins");
         uint256 posterDeposit = contestations[contestationId].posterLock;
         address poster = contestations[contestationId].poster;
         address moderator = contestations[contestationId].moderator;
@@ -323,7 +331,7 @@ contract StakedModeration is PullPayment, AccessControl {
         contentCreatorDeposits[contestations[contestationId].poster] -= posterDeposit;
         _asyncTransfer(moderator, posterDeposit);
 
-        if(  contentCreatorDeposits[contestations[contestationId].poster] < settings.contentCreationDeposit) {
+        if(  contentCreatorDeposits[contestations[contestationId].poster] < settings.posterDeposit) {
             _revokeRole(POSTER_ROLE, contestations[contestationId].poster);
         }
 

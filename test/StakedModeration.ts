@@ -29,7 +29,9 @@ class Server {
 
 describe("StakedModeration", function () {
   let sm: any;
+  let stAda: any;
   let server: Server;
+
 
   const posters: any[] = [];
   const moderators: any[] = [];
@@ -47,10 +49,18 @@ describe("StakedModeration", function () {
       moderators.push(wallets[i]);
     }
 
+    stAda = await ethers.deployContract("StakedMADA");
+
+    // mint a random amount into each wallet
+    for (let i = 0; i < wallets.length; i++) {
+      const amount = Math.floor(Math.random() * 1000);
+      await stAda.mint(wallets[i].address, amount);
+    }
+
   });
 
   it("Staked Moderation", async function () {
-    sm = await ethers.deployContract("StakedModeration", [server.signerAddress]);
+    sm = await ethers.deployContract("StakedModeration", [server.signerAddress, await stAda.getAddress()]);
     await sm.waitForDeployment();
     const settings = await sm.settings();
     console.log(settings)
@@ -202,9 +212,8 @@ describe("StakedModeration", function () {
     console.log(`Wallet 4 balance: ${wallet4BalanceAfter} or (${ethers.formatEther(wallet4BalanceAfter)} ETH)`)
 
     for (let i = 3; i < wallets.length; i++) {
-    // for (let i = 3; i < 6; i++) {
-      const vote : boolean = Math.random() * 1000 % 2 == 0;
-      console.log(`Voting ${vote ? 'yes': 'no'} from ${wallets[i].address}`)
+      const vote : boolean = Math.random() > 0.5;
+      console.log(`Voting ${vote ? 'Yay': 'Nay'} from ${wallets[i].address}`)
 
       const smConnected = await sm.connect(wallets[i])
       const tx = await smConnected.voteOnContestation(0, vote);
@@ -215,8 +224,13 @@ describe("StakedModeration", function () {
   it("Once the contestation is over, the funds can be distributed", async function () {
     const smModerator = await sm.connect(moderators[0]);
 
-    await smModerator.distributeContestation(0);
-    
+    const tx = await smModerator.closeContestation(0);
+    const receipt = await tx.wait();
+
+    const events = receipt.logs.filter((log: any) =>  (log instanceof ethers.EventLog))
+    console.log(events)
+    expect(events[0].fragment.name).to.equal('RoleRevoked') // poster or moderator lost their role
+    expect(events[1].fragment.name).to.equal('ContestationClosed') 
   })
 
 
